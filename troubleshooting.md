@@ -48,7 +48,7 @@ Keep chronological entries. Copy this block for each meaningful investigation.
   `docker compose -p barq-assessment exec nginx wget -qO- http://app-01:8080/health`
   -> `{"instance_id":"app-01","service":"barq-api","status":"alive","version":"2.0.0"}`
   Same command that previously failed with "Connection refused" now succeeds.
-- Related commit: [fill in commit hash after committing]
+- Related commit: bcae930
 - Remaining uncertainty: The (unhealthy) Docker status may still persist
   after this fix alone, since the healthcheck itself queries 127.0.0.1 from
   inside the container (unaffected by the bind-address bug) but hits
@@ -80,7 +80,7 @@ Keep chronological entries. Copy this block for each meaningful investigation.
   -> `{"instance_id":"app-01","service":"barq-api","status":"alive","version":"2.0.0"}`
   This confirms both the Entry 2 fix (APP_HOST) and the Entry 3 fix
   (healthcheck path) are working together correctly.
-- Related commit: [fill in commit hash after committing]
+- Related commit: bcae930
 - Remaining uncertainty: `curl -i http://127.0.0.1:8080/` from the host still
   fails with "Recv failure: Connection reset by peer". This is a separate,
   known issue: nginx.conf listens on port 80, but docker-compose.yml maps
