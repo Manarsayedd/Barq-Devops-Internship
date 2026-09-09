@@ -5,11 +5,11 @@ x-app: &app
   restart: "no"
   env_file: ./config/app.env
   environment: &app-env
-    APP_HOST: "127.0.0.1"
+    APP_HOST: "0.0.0.0"
     APP_PORT: "8080"
     APP_MESSAGE: "Welcome to BARQ Systems"
   healthcheck:
-    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)"]
+    test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=2)"]
     interval: 5s
     timeout: 3s
     retries: 3
