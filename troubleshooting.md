@@ -134,3 +134,89 @@ appeared to have INSTANCE_ID: "app-01" duplicated on both app-01 and app-02
 services. On inspection of the actual working file, app-02 correctly sets
 INSTANCE_ID: "app-02". This was a false positive from the initial review,
 not an actual bug in the environment. No fix was needed for this item.
+## Entry 5 / 2026-09-13 / proxy_next_upstream failover investigation
+- Symptom: Stopping app-01 while it is in nginx's upstream pool causes ~50%
+  of client requests to fail with raw 502/504 errors instead of nginx
+  automatically serving them from the remaining healthy backend (app-02).
+- Hypothesis: nginx.conf sets `proxy_next_upstream off;`, which disables
+  nginx's default behavior of retrying a failed upstream request against
+  another backend in the pool.
+- Command or test (before fix):
+  docker compose -p barq-assessment stop app-01
+  for i in $(seq 1 10); do curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/instance; done
+- Actual output (before fix):
+  504, 502, 504, 502, 504, 502, 504, 502, 504, 502
+  nginx logs confirm each failed request only attempted a single upstream
+  (172.18.0.2, app-01) with no retry against app-02, e.g.:
+  "connect() failed (113: Host is unreachable) while connecting to upstream"
+- Failed attempt and what changed your thinking: An earlier attempt at this
+  same test showed nginx, postgres, redis, and app-02 all "Exited (255)"
+  simultaneously, unrelated to this test — traced to a WSL/Docker Desktop
+  suspension (laptop sleep) during testing, not an application fault.
+  Environment was restarted with `down` then `up -d` before repeating the
+  test cleanly.
+- Root cause: `proxy_next_upstream off;` in nginx/nginx.conf explicitly
+  disabled nginx's automatic failover to a healthy backend when the chosen
+  upstream fails or times out.
+- Fix: Changed nginx/nginx.conf to:
+  proxy_next_upstream error timeout http_502 http_503 http_504;
+  proxy_next_upstream_tries 2;
+  proxy_next_upstream_timeout 4s;
+  Recreated nginx: docker compose -p barq-assessment up -d --force-recreate nginx
+- Retest evidence (after fix):
+  docker compose -p barq-assessment stop app-01
+  for i in $(seq 1 10); do curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8080/instance; done
+  -> 200, 200, 200, 200, 200, 200, 200, 200, 200, 200 (all succeeded)
+  nginx logs confirm the retry chain directly, e.g.:
+  upstream:"172.18.0.2:8080, 172.18.0.3:8080"
+  upstream_status:"502, 200"
+  This shows nginx tried app-01, received a 502, automatically retried
+  app-02, and returned that 200 to the client — zero visible failures.
+- Related commit: [fill in after committing]
+- Remaining uncertainty: None regarding basic single-backend failover.
+  Behavior under both backends being down simultaneously, or a slow (not
+  fully dead) backend, has not yet been tested.
+  ## Entry 6 / 2026-09-13 / DATABASE_URL/REDIS_URL credential mismatch
+- Symptom: GET /records returned {"error":"postgres_unavailable"} even though
+  postgres itself was healthy, had the correct schema (records table via
+  database/init.sql), and contained seed data confirmed via direct psql query.
+- Hypothesis: The app's DATABASE_URL might differ from postgres's actual
+  configured credentials/port.
+- Command or test:
+  docker compose -p barq-assessment logs app-01 --no-color | grep dependency_error
+  -> repeated "OperationalError" entries
+  docker compose -p barq-assessment exec app-01 python -c "import psycopg;
+  psycopg.connect('postgresql://barq_app:BarqLabOnly_7qN2vK8c@postgres:5432/barq_tasks', ...)"
+  -> succeeded (using the CORRECT connection string typed manually)
+  docker compose -p barq-assessment exec app-01 env | grep -E "DATABASE_URL|REDIS_URL"
+  -> DATABASE_URL=postgresql://barq_app:BarqLabOnly_7qN2vK8d@postgres:5433/barq_tasks
+  -> REDIS_URL=redis://redis:6380/0
+- Actual output: Comparing the app's actual env var against postgres's real
+  config in docker-compose.yml revealed three mismatches: password ends in
+  "8d" instead of the real "8c", Postgres port is "5433" instead of the real
+  "5432", and Redis port is "6380" instead of the real "6379".
+- Failed attempt and what changed your thinking: Initially tested the raw
+  connection with a manually-typed, correct connection string, which
+  succeeded — this created a false impression that connectivity was fine.
+  Only checking the ACTUAL env vars set inside the container (rather than
+  assuming they matched what the app "should" have) revealed the real bug.
+  Lesson: verify what the app is actually configured with, not just whether
+  the dependency is reachable with known-good credentials.
+- Root cause: config/app.env contained a wrong password character, wrong
+  Postgres port, and wrong Redis port for DATABASE_URL and REDIS_URL.
+- Fix: Corrected config/app.env:
+  DATABASE_URL=postgresql://barq_app:BarqLabOnly_7qN2vK8c@postgres:5432/barq_tasks
+  REDIS_URL=redis://redis:6379/0
+  docker compose -p barq-assessment up -d --force-recreate app-01 app-02
+- Retest evidence:
+  curl http://127.0.0.1:8080/records
+  -> {"records":[{"id":1,"title":"Review service readiness"},
+      {"id":2,"title":"Document the operating procedure"}], ...}
+  curl http://127.0.0.1:8080/counter -> {"counter":1, ...}
+  curl http://127.0.0.1:8080/ready
+  -> {"dependencies":{"postgres":"ready","redis":"ready"},"status":"ready",...}
+- Related commit: [fill in after committing]
+- Remaining uncertainty: None regarding basic connectivity. Note this
+  DATABASE_URL/REDIS_URL was not caught during the original static review of
+  docker-compose.yml, since these values live in the separate config/app.env
+  file (referenced via env_file:), not inline in the compose file itself.
