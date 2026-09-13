@@ -86,3 +86,51 @@ Keep chronological entries. Copy this block for each meaningful investigation.
   known issue: nginx.conf listens on port 80, but docker-compose.yml maps
   host port 8080 to container port 81, where nothing is listening. This will
   be investigated next as its own entry.
+  ## Entry 4 / 2026-09-13 / NGINX port mismatch investigation
+- Symptom: `curl -i http://127.0.0.1:8080/` failed with
+  "Recv failure: Connection reset by peer" from the host machine.
+- Hypothesis: nginx.conf listens on port 80 inside its container, but
+  docker-compose.yml maps host port 8080 to container port 81, where
+  nothing is listening.
+- Command or test:
+  Changed docker-compose.yml: ports mapping from
+  "127.0.0.1:${PUBLIC_PORT:-8080}:81" to
+  "127.0.0.1:${PUBLIC_PORT:-8080}:80"
+  Also changed nginx/nginx.conf upstream block: "server app-01:8081"
+  to "server app-01:8080" (app-01 was never actually listening on 8081;
+  APP_PORT is 8080 for both app services per docker-compose.yml).
+  docker compose -p barq-assessment down
+  docker compose -p barq-assessment up -d
+  curl -i http://127.0.0.1:8080/
+- Actual output:
+  HTTP/1.1 200 OK
+  {"instance_id":"app-01","message":"Welcome to BARQ Systems", ...}
+- Failed attempt and what changed your thinking: First retest used
+  `docker compose up -d --force-recreate nginx` only (not a full down/up).
+  A burst of 10 rapid requests all hit the same upstream IP
+  (172.18.0.3, app-01), suggesting load balancing wasn't working. A full
+  `down` + `up` (recreating all containers together) followed by requests
+  spaced 1 second apart showed clear alternation between app-01 and app-02.
+  This showed the earlier result was a startup-timing artifact from a
+  partial recreate, not a real load-balancing bug.
+- Root cause: Two separate config mismatches in NGINX: (1) container listened
+  on port 80 but Compose mapped host 8080 to container port 81; (2) the
+  upstream block pointed app-01 at port 8081, a port it never listens on.
+- Fix: Corrected the Compose port mapping to 8080:80, and corrected the
+  upstream block to use app-01:8080.
+- Retest evidence:
+  curl -i http://127.0.0.1:8080/  -> HTTP/1.1 200 OK
+  10 requests spaced 1s apart via /instance alternated between
+  app-01 and app-02 roughly evenly, confirming both backends are reachable
+  and being load-balanced correctly through nginx.
+- Related commit: [fill in after committing]
+- Remaining uncertainty: None regarding this specific issue. Separately
+  noted: proxy_next_upstream off is still set in nginx.conf, which disables
+  automatic failover to a healthy backend if one goes down — this will be
+  addressed and tested as part of Part 3's failure_test requirement.
+  ## Note / 2026-09-13 / correcting an earlier assumption
+During initial static review, the docker-compose.yml shared for analysis
+appeared to have INSTANCE_ID: "app-01" duplicated on both app-01 and app-02
+services. On inspection of the actual working file, app-02 correctly sets
+INSTANCE_ID: "app-02". This was a false positive from the initial review,
+not an actual bug in the environment. No fix was needed for this item.
