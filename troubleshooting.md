@@ -422,7 +422,7 @@ not an actual bug in the environment. No fix was needed for this item.
     -> {"dependencies":{"postgres":"ready","redis":"ready"},"status":"ready",...}
     curl http://127.0.0.1:8080/records
     -> all 3 records returned correctly, unaffected by the recreate
-- Related commit: [fill in after committing]
+- Related commit: a72b07f
 - Remaining uncertainty: Resource limit values (256M/0.5 CPU for apps,
   512M/1.0 CPU for postgres, etc.) were chosen as reasonable defaults for
   a lab environment, not derived from actual load testing. In production,
