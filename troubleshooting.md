@@ -220,3 +220,65 @@ not an actual bug in the environment. No fix was needed for this item.
   DATABASE_URL/REDIS_URL was not caught during the original static review of
   docker-compose.yml, since these values live in the separate config/app.env
   file (referenced via env_file:), not inline in the compose file itself.
+  ## Entry 7 / 2026-09-13 / PostgreSQL persistence (volume/tmpfs mismatch)
+- Symptom: A record created via POST /records does not survive recreating
+  the postgres container, even though a named volume (postgres-data) is
+  declared in docker-compose.yml.
+- Hypothesis: The named volume is mounted to /var/lib/postgresql/backup,
+  which Postgres does not use by default. The actual data directory
+  /var/lib/postgresql/data is mounted as tmpfs (memory-backed), which is
+  wiped whenever the container is removed.
+- Command or test:
+  curl -X POST -d '{"title":"Persistence proof before recreate"}' \
+    http://127.0.0.1:8080/records
+  curl http://127.0.0.1:8080/records
+  -> records: [1, 2, 3] (3 = new record)
+  docker compose -p barq-assessment stop postgres
+  docker compose -p barq-assessment rm -f postgres
+  docker compose -p barq-assessment up -d postgres
+  curl http://127.0.0.1:8080/records
+- Actual output: records: [1, 2] only — record 3 is gone. Postgres logs
+  (docker compose logs postgres) confirmed a full fresh initdb ran again,
+  including re-executing database/init.sql and re-inserting the two seed
+  rows, exactly as would happen with no prior data at all.
+- Root cause: Confirmed. The named volume postgres-data is mounted to
+  /var/lib/postgresql/backup, an unused path. The real Postgres data
+  directory (/var/lib/postgresql/data) is mounted as tmpfs, so all data is
+  lost whenever the container is removed and recreated.
+- Fix: Changed docker-compose.yml to mount the named volume at the correct
+  path:
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+  and removed the tmpfs entry entirely.
+- Failed attempt and what changed your thinking:
+  (1) After editing the volumes block, the two list items were accidentally
+  left indented with only 2 spaces while "volumes:" itself was indented 4
+  spaces — less than its parent key. This produced a YAML parse error
+  ("did not find expected key") and postgres failed to start. Fixed by
+  re-indenting both list items to 6 spaces, matching the file's existing
+  style, then validating with `docker compose config > /dev/null`.
+  (2) After fixing the YAML, the first attempt to retest persistence created
+  a new record BEFORE recreating postgres with the corrected config —
+  meaning that record was still written to the old, still-running
+  tmpfs-backed instance and was lost as expected, producing a misleading
+  "fix didn't work" result. This clarified that the correct test sequence
+  must be: recreate postgres first (to actually apply the new volume
+  mount), THEN create the test record, THEN recreate postgres again to
+  test whether it survives.
+- Retest evidence: Repeating the test in the correct order:
+    docker compose -p barq-assessment up -d postgres   (applies corrected mount)
+    curl -X POST -d '{"title":"Persistence proof - real test"}' \
+      http://127.0.0.1:8080/records
+    docker compose -p barq-assessment stop postgres
+    docker compose -p barq-assessment rm -f postgres
+    docker compose -p barq-assessment up -d postgres
+    curl http://127.0.0.1:8080/records
+  Result: records: [1, 2, 3] — record 3 ("Persistence proof - real test")
+  survived the container recreation. Fix confirmed working.
+- Related commit: [fill in after committing]
+- Remaining uncertainty: None regarding basic persistence across container
+  recreation. Not yet tested: persistence across a full `docker compose down`
+  (which also removes networks) or a host machine restart — planned as part
+  of Part 3's formal backup/restore testing.
+  
