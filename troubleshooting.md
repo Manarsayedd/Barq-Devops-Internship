@@ -360,11 +360,70 @@ not an actual bug in the environment. No fix was needed for this item.
     curl http://127.0.0.1:8080/        -> 200 OK
     curl http://127.0.0.1:8080/ready   -> postgres: ready, redis: ready
     curl http://127.0.0.1:8080/records -> all 3 records returned correctly
-- Related commit: [fill in after committing]
+- Related commit: 4041fbb
 - Remaining uncertainty: None. Note: a clean "before" test proving nginx
   COULD resolve postgres/redis prior to the fix was not captured separately,
   since the fix was applied in the same step as the test; the isolation
   requirement and its resolution are nonetheless clearly demonstrated by
   the after-fix result and by direct inspection of the original
   docker-compose.yml network configuration.
-
+  ## Entry 10 / 2026-09-14 / resource limits, restart policies, and Redis persistence
+- Symptom/requirement: The brief requires "correct... restart policies and
+  resource limits" and asks to "configure Redis persistence where
+  appropriate." The original docker-compose.yml had no CPU/memory limits on
+  any service, restart: "no" on app-01/app-02, and Redis running with
+  --save "" --appendonly no (no persistence at all).
+- Hypothesis: These are resilience/production-readiness gaps rather than
+  functional bugs — the environment runs fine without them, but does not
+  meet the brief's stated operational requirements.
+- Command or test:
+  Added deploy.resources.limits to x-app (256M/0.5 CPU), postgres
+  (512M/1.0 CPU), redis (128M/0.5 CPU), and nginx (64M/0.5 CPU).
+  Changed restart: "no" to restart: unless-stopped in the shared x-app
+  anchor, and added restart: unless-stopped explicitly to postgres, redis,
+  and nginx.
+  docker compose -p barq-assessment up -d --force-recreate
+  docker inspect <service> --format 'Memory={{.HostConfig.Memory}}
+    NanoCpus={{.HostConfig.NanoCpus}}'
+  docker inspect <service> --format 'RestartPolicy=
+    {{.HostConfig.RestartPolicy.Name}}'
+- Actual output:
+  app-01:   Memory=268435456 (256MB)  NanoCpus=500000000 (0.5 CPU)
+  postgres: Memory=536870912 (512MB)  NanoCpus=1000000000 (1.0 CPU)
+  redis:    Memory=134217728 (128MB)  NanoCpus=500000000 (0.5 CPU)
+  nginx:    Memory=67108864  (64MB)   NanoCpus=500000000 (0.5 CPU)
+  All four services: RestartPolicy=unless-stopped
+- Failed attempt and what changed your thinking: First attempt applied
+  resource limits but forgot to actually change the restart: "no" line in
+  the same edit — deploy.resources.limits took effect immediately
+  (confirmed via docker inspect), but RestartPolicy still showed "no" on
+  retest. This was caught by explicitly checking each setting individually
+  with docker inspect rather than assuming both changes landed together.
+  Also encountered and fixed a YAML indentation error during this edit
+  (a deploy: block nested under the wrong parent key), validated with
+  `docker compose config > /dev/null` before applying.
+- Root cause: docker-compose.yml had no deploy.resources.limits on any
+  service, and used restart: "no" on the app services, meaning a crashed
+  container would never recover automatically and no service had any
+  memory/CPU ceiling.
+- Fix: Added resource limits per service as shown above; changed restart
+  policy to unless-stopped for app-01, app-02, postgres, redis, and nginx.
+- Decision (Redis persistence): Kept Redis persistence disabled
+  (--save "" --appendonly no). The only data Redis holds in this
+  environment is the /counter value, which is non-critical, ephemeral
+  request-counting data with no business significance. Enabling AOF/RDB
+  persistence would add operational complexity (an additional volume,
+  extra disk I/O, longer restart times) for no meaningful benefit here.
+  This trade-off is documented in decisions.md. If /counter were used for
+  something business-critical, this decision would be revisited.
+- Retest evidence: App functionality confirmed unaffected after applying
+  all changes:
+    curl http://127.0.0.1:8080/ready
+    -> {"dependencies":{"postgres":"ready","redis":"ready"},"status":"ready",...}
+    curl http://127.0.0.1:8080/records
+    -> all 3 records returned correctly, unaffected by the recreate
+- Related commit: [fill in after committing]
+- Remaining uncertainty: Resource limit values (256M/0.5 CPU for apps,
+  512M/1.0 CPU for postgres, etc.) were chosen as reasonable defaults for
+  a lab environment, not derived from actual load testing. In production,
+  these would need tuning based on real traffic/query patterns.
