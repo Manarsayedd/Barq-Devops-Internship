@@ -123,7 +123,7 @@ Keep chronological entries. Copy this block for each meaningful investigation.
   10 requests spaced 1s apart via /instance alternated between
   app-01 and app-02 roughly evenly, confirming both backends are reachable
   and being load-balanced correctly through nginx.
-- Related commit: [fill in after committing]
+- Related commit: efe957f
 - Remaining uncertainty: None regarding this specific issue. Separately
   noted: proxy_next_upstream off is still set in nginx.conf, which disables
   automatic failover to a healthy backend if one goes down — this will be
@@ -172,7 +172,7 @@ not an actual bug in the environment. No fix was needed for this item.
   upstream_status:"502, 200"
   This shows nginx tried app-01, received a 502, automatically retried
   app-02, and returned that 200 to the client — zero visible failures.
-- Related commit: [fill in after committing]
+- Related commit: e10a80c
 - Remaining uncertainty: None regarding basic single-backend failover.
   Behavior under both backends being down simultaneously, or a slow (not
   fully dead) backend, has not yet been tested.
@@ -215,7 +215,7 @@ not an actual bug in the environment. No fix was needed for this item.
   curl http://127.0.0.1:8080/counter -> {"counter":1, ...}
   curl http://127.0.0.1:8080/ready
   -> {"dependencies":{"postgres":"ready","redis":"ready"},"status":"ready",...}
-- Related commit: [fill in after committing]
+- Related commit: 1264650
 - Remaining uncertainty: None regarding basic connectivity. Note this
   DATABASE_URL/REDIS_URL was not caught during the original static review of
   docker-compose.yml, since these values live in the separate config/app.env
@@ -276,9 +276,95 @@ not an actual bug in the environment. No fix was needed for this item.
     curl http://127.0.0.1:8080/records
   Result: records: [1, 2, 3] — record 3 ("Persistence proof - real test")
   survived the container recreation. Fix confirmed working.
-- Related commit: [fill in after committing]
+- Related commit: fe9235b
 - Remaining uncertainty: None regarding basic persistence across container
   recreation. Not yet tested: persistence across a full `docker compose down`
   (which also removes networks) or a host machine restart — planned as part
   of Part 3's formal backup/restore testing.
-  
+  ## Entry 8 / 2026-09-14 / removing exposed PostgreSQL/Redis host ports
+- Symptom/requirement: The brief requires "Publish only NGINX on host port
+  8080. Do not publish app, PostgreSQL or Redis ports." The original
+  docker-compose.yml exposed both:
+    postgres: ports: ["127.0.0.1:15432:5432"]
+    redis: ports: ["127.0.0.1:16379:6379"]
+- Hypothesis: These host-exposed ports allow direct access to the database
+  and cache from the host machine, bypassing the app and nginx entirely,
+  against the brief's isolation requirement.
+- Command or test / actual output:
+  Checking the committed file directly (git show HEAD:docker-compose.yml)
+  showed postgres's ports: line had already been removed in an earlier
+  commit (fe9235b) as an untracked side effect of an unrelated volume fix.
+  Redis's ports: line was still present and committed at that point.
+- Failed attempt and what changed your thinking: `nc -zv` tests against
+  both ports initially both showed "Connection refused," which looked like
+  both were already fixed. Directly inspecting the committed file (git show
+  HEAD:docker-compose.yml) revealed redis's ports: line was still present,
+  contradicting the nc test. This is unresolved as to why nc reported
+  refused for a port that was, per the committed config, supposed to be
+  mapped — possibly a stale container instance at the time of that specific
+  test. Relying on the committed file content, rather than a single runtime
+  test, was necessary to catch this discrepancy.
+- Root cause: docker-compose.yml explicitly published host ports for both
+  postgres (15432->5432) and redis (16379->6379), against the brief's
+  requirement that only nginx be published on the host.
+- Fix: Removed the `ports:` line from the redis service (postgres's had
+  already been removed earlier). Recreated redis:
+    docker compose -p barq-assessment up -d --force-recreate redis
+- Retest evidence:
+    nc -zv 127.0.0.1 15432   -> Connection refused
+    nc -zv 127.0.0.1 16379   -> Connection refused
+    docker compose -p barq-assessment ps -a
+    -> postgres: 5432/tcp only (no host mapping)
+    -> redis: 6379/tcp only (no host mapping)
+    curl http://127.0.0.1:8080/ready
+    -> {"dependencies":{"postgres":"ready","redis":"ready"},"status":"ready",...}
+    curl http://127.0.0.1:8080/counter -> counter increments correctly
+  Confirms both services are unreachable from the host directly, while the
+  app continues to function normally via the internal Docker network.
+- Related commit:3701a98
+- Remaining uncertainty: None regarding final state. Noted as a process
+  lesson: verify fixes against the actual committed file content, not just
+  a single runtime network test, since container state and file state can
+  briefly diverge during iterative editing.
+  ## Entry 9 / 2026-09-14 / NGINX network isolation from PostgreSQL/Redis
+- Symptom/requirement: The brief requires "Connect NGINX + apps to frontend;
+  apps + PostgreSQL + Redis to backend... Block direct NGINX access to
+  PostgreSQL/Redis." The original docker-compose.yml attached nginx to both
+  networks: [frontend, backend], giving it network-level reachability to
+  postgres and redis even though nginx.conf never proxies to them directly.
+- Hypothesis: With nginx on the backend network, it should be able to
+  resolve and connect to postgres/redis hostnames, violating isolation.
+- Command or test (before fix):
+  docker compose -p barq-assessment exec nginx nc -zv postgres 5432
+  docker compose -p barq-assessment exec nginx nc -zv redis 6379
+- Actual output (before fix): [not captured with a clean before-state due to
+  moving directly to the fix; DNS resolution and connection were expected to
+  succeed given nginx's network membership at that time — confirmed
+  indirectly by the after-fix result showing resolution now fails]
+- Root cause: docker-compose.yml's nginx service listed
+  networks: [frontend, backend], granting it network membership on backend
+  alongside postgres and redis, contrary to the brief's isolation
+  requirement.
+- Fix: Changed nginx's networks to networks: [frontend] only, removing
+  backend network membership.
+- Retest evidence:
+    docker compose -p barq-assessment up -d --force-recreate nginx
+    docker compose -p barq-assessment exec nginx nc -zv postgres 5432
+    -> nc: bad address 'postgres'
+    docker compose -p barq-assessment exec nginx nc -zv redis 6379
+    -> nc: bad address 'redis'
+  DNS resolution itself fails, confirming nginx is no longer on the same
+  network as postgres/redis and cannot reach them at all, not merely
+  blocked at the application layer.
+  App functionality confirmed unaffected:
+    curl http://127.0.0.1:8080/        -> 200 OK
+    curl http://127.0.0.1:8080/ready   -> postgres: ready, redis: ready
+    curl http://127.0.0.1:8080/records -> all 3 records returned correctly
+- Related commit: [fill in after committing]
+- Remaining uncertainty: None. Note: a clean "before" test proving nginx
+  COULD resolve postgres/redis prior to the fix was not captured separately,
+  since the fix was applied in the same step as the test; the isolation
+  requirement and its resolution are nonetheless clearly demonstrated by
+  the after-fix result and by direct inspection of the original
+  docker-compose.yml network configuration.
+
