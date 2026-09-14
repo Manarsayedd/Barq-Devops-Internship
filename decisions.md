@@ -56,7 +56,7 @@ Record at least 5 decisions. Include assumptions and limits.
   or redis over the network.
 - Trade-off: None significant; NGINX never needed backend access for its
   actual job (proxying to app-01/app-02, which are on both networks).
-- Evidence / commit: [NEEDED — commit hash for the Entry 9 nginx network fix]
+- Evidence / commit: 4041fbb
 - Production improvement: In production, this would be reinforced further
   with actual network policies (e.g. Kubernetes NetworkPolicies or a
   service mesh) rather than relying solely on Docker Compose network
@@ -100,7 +100,7 @@ Record at least 5 decisions. Include assumptions and limits.
   but means a genuinely crashed container also will not "surprise restart"
   if a human happened to have stopped something else nearby — this is an
   acceptable trade-off for a lab/assessment environment.
-- Evidence / commit: [NEEDED — commit hash for the resource limits/restart fix]
+- Evidence / commit:a72b07f
 - Production improvement: Resource limit values (256M/0.5 CPU for apps,
   512M/1.0 CPU for postgres, etc.) were chosen as reasonable defaults for a
   lab environment, not derived from load testing. In production these would
@@ -126,7 +126,7 @@ Record at least 5 decisions. Include assumptions and limits.
   be lost in a hard crash (versus always, which fsyncs every write but adds
   latency). everysec is the standard production-reasonable middle ground.
   AOF also adds a small amount of disk I/O and a named volume to manage.
-- Evidence / commit: [NEEDED — commit hash for the Redis AOF change]
+- Evidence / commit: ce381cb
 - Production improvement: In production, this would be paired with
   periodic AOF rewrites/compaction monitoring, and potentially RDB
   snapshots alongside AOF for faster full-restore scenarios, plus

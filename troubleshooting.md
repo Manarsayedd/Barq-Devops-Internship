@@ -427,3 +427,38 @@ not an actual bug in the environment. No fix was needed for this item.
   512M/1.0 CPU for postgres, etc.) were chosen as reasonable defaults for
   a lab environment, not derived from actual load testing. In production,
   these would need tuning based on real traffic/query patterns.
+  ## Entry 11 / 2026-09-14 / Redis AOF persistence
+- Symptom/requirement: The brief asks to "configure Redis persistence where
+  appropriate." The original redis command (--save "" --appendonly no)
+  meant the /counter value reset to 0 on every Redis restart or recreation.
+- Hypothesis: Enabling AOF (--appendonly yes) with a named volume mounted
+  at Redis's data directory (/data) would allow the counter value to
+  survive container recreation.
+- Command or test:
+  Changed redis service command to:
+    ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec"]
+  Added a named volume:
+    volumes: [redis-data:/data]
+  Added redis-data to the top-level volumes: section.
+  docker compose -p barq-assessment up -d --force-recreate redis
+  curl http://127.0.0.1:8080/counter   (x3, to build up a known value)
+  docker compose -p barq-assessment stop redis
+  docker compose -p barq-assessment rm -f redis
+  docker compose -p barq-assessment up -d redis
+  curl http://127.0.0.1:8080/counter
+- Actual output: Counter incremented 1, 2, 3 across three initial calls.
+  After stopping, removing, and recreating the redis container, the next
+  call returned 4 — continuing from the prior value rather than resetting
+  to 1. Confirms the AOF file was loaded correctly on Redis startup.
+- Root cause: N/A — this is a persistence enhancement, not a bug fix. The
+  original off-by-default persistence configuration meant no durability
+  guarantee existed for Redis data across container recreation.
+- Fix: Enabled AOF persistence with everysec fsync policy and a dedicated
+  named volume for Redis's /data directory.
+- Retest evidence: See "Actual output" above — counter value of 4 after
+  recreation proves persistence works correctly.
+- Related commit: ce381cb
+- Remaining uncertainty: Not yet tested: behavior under simultaneous
+  Redis + app container recreation, or recovery from a genuinely corrupted
+  AOF file (would require Redis's built-in AOF repair tooling in that
+  scenario).
